@@ -141,44 +141,69 @@ class API:
     ) -> JSONResponse:
         """Obtiene logs dentro de un rango temporal específico.
 
-        Este método:
-        1. Busca primero en el cache temporal
-        2. Si no encuentra logs en cache, busca en la base de datos
-        3. Convierte los logs encontrados a formato JSON
+        SOLUCIÓN AL BUG: Ahora combina logs del caché Y de la base de datos,
+        eliminando duplicados y manteniendo orden temporal.
 
         Args:
             start_time (datetime): Inicio del rango temporal en formato ISO (YYYY-MM-DDTHH:MM:SS)
             end_time (datetime): Fin del rango temporal en formato ISO (YYYY-MM-DDTHH:MM:SS)
 
         Returns:
-            JSONResponse: Respuesta HTTP con:
-                - content: {"logs": [lista de logs encontrados]}
-                - media_type: "application/json"
-                - status_code: 200
-
-        Example:
-            GET /logs?start_time=2023-04-23T10:00:00&end_time=2023-04-23T10:05:00
-            
-            Response:
-            {
-                "logs": [
-                    {
-                        "timestamp": "2023-04-23T10:00:00",
-                        "tag": "INFO",
-                        "message": "Test log"
-                    }
-                ]
-            }
+            JSONResponse: Respuesta HTTP con todos los logs encontrados (caché + BD)
         """
+        # 1. Obtener logs del caché
         cache_logs: list[LogEntry] = self.__cache.get_logs(start_time, end_time)
-        overall_logs: list[LogEntry] = self.__db_service.get_logs(start_time, end_time) \
-            if not cache_logs else cache_logs  # buscamos en la base de datos si no estan en el cache
+        
+        # 2. Obtener logs de la base de datos
+        db_logs: list[LogEntry] = self.__db_service.get_logs(start_time, end_time)
+        
+        # 3. Combinar ambas fuentes eliminando duplicados
+        overall_logs: list[LogEntry] = self._merge_logs(cache_logs, db_logs)
+        
+        # 4. Convertir a formato JSON
         jsonable_logs: list[dict] = [
-            jsonable_encoder(log.model_dump() )
+            jsonable_encoder(log.model_dump())
             for log in overall_logs
         ]
         
-        return JSONResponse(content={"logs": jsonable_logs}, media_type="application/json", status_code=200)
+        return JSONResponse(
+            content={"logs": jsonable_logs}, 
+            media_type="application/json", 
+            status_code=200
+        )
+
+    def _merge_logs(self, cache_logs: list[LogEntry], db_logs: list[LogEntry]) -> list[LogEntry]:
+        """Combina logs del caché y la base de datos eliminando duplicados.
+        
+        Args:
+            cache_logs (list[LogEntry]): Logs obtenidos del caché temporal
+            db_logs (list[LogEntry]): Logs obtenidos de la base de datos
+            
+        Returns:
+            list[LogEntry]: Lista combinada y ordenada sin duplicados
+        """
+        # Usar un set para eliminar duplicados basándose en timestamp + tag + message
+        unique_logs = set()
+        combined_logs = []
+        
+        # Procesar logs del caché primero (pueden ser más recientes)
+        for log in cache_logs:
+            log_key = (log.timestamp, log.tag, log.message)
+            if log_key not in unique_logs:
+                unique_logs.add(log_key)
+                combined_logs.append(log)
+        
+        # Agregar logs de la BD que no estén duplicados
+        for log in db_logs:
+            log_key = (log.timestamp, log.tag, log.message)
+            if log_key not in unique_logs:
+                unique_logs.add(log_key)
+                combined_logs.append(log)
+        
+        # Ordenar por timestamp (el más antiguo primero)
+        combined_logs.sort(key=lambda log: log.timestamp)
+        
+        return combined_logs
     
     async def get_all_logs(self) -> JSONResponse:
         """Obtiene todos los logs almacenados en el cache temporal.
